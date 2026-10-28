@@ -292,6 +292,170 @@ class DutyApp extends StatelessWidget {
   }
 }
 
+// ───────────────────────── ডেটা সংরক্ষণ, এক্সপোর্ট ও ব্যাকআপ ─────────────────────────
+String periodKeyFor(DateTime start) =>
+    'p_${start.year}-${start.month.toString().padLeft(2, '0')}';
+
+Map<String, DayEntry> readPeriod(SharedPreferences p, DateTime start) {
+  final out = <String, DayEntry>{};
+  final raw = p.getString(periodKeyFor(start));
+  if (raw == null) return out;
+  try {
+    final m = jsonDecode(raw) as Map;
+    m.forEach((k, v) {
+      out[k as String] =
+          DayEntry.fromJson(Map<String, dynamic>.from(v as Map));
+    });
+  } catch (_) {}
+  return out;
+}
+
+String dFull(DateTime d) =>
+    '${d.day.toString().padLeft(2, '0')}-${d.month.toString().padLeft(2, '0')}-${d.year}';
+
+String plainNum(double v) =>
+    v == v.roundToDouble() ? v.toInt().toString() : v.toStringAsFixed(1);
+
+// একটি বেতন মাসের টেবিল (ট্যাব দিয়ে আলাদা, Excel/Sheets এ পেস্ট করলে ঘর হয়ে যায়)
+String monthBlock(PaySettings s, DateTime start, Map<String, DayEntry> e) {
+  final length = daysInMonth(start.year, start.month);
+  final end = DateTime(start.year, start.month, start.day + length - 1);
+  final sm = calcSummary(s, start, length, e);
+  final b = StringBuffer();
+  b.writeln('বেতন মাস\t${dFull(start)} থেকে ${dFull(end)}');
+  b.writeln('তারিখ\tবার\tঅবস্থা\tওটি ঘন্টা\tনাইট\tIN\tOUT');
+  for (var i = 0; i < length; i++) {
+    final d = DateTime(start.year, start.month, start.day + i);
+    final en = e[dateKey(d)];
+    final fri = d.weekday == DateTime.friday;
+    final st = fri ? 'WL' : (en == null ? '' : en.st);
+    final ot = (en == null || en.ot == 0) ? '' : plainNum(en.ot);
+    final night = (en != null && en.night) ? 'Y' : '';
+    final inT = en == null ? '' : en.inT;
+    final outT = en == null ? '' : en.outT;
+    b.writeln([dFull(d), kWd[d.weekday - 1], st, ot, night, inT, outT]
+        .join('\t'));
+  }
+  b.writeln();
+  void row(String k, String v) => b.writeln('$k\t$v');
+  row('উপস্থিত দিন', '${sm.present}');
+  row('অনুপস্থিত', '${sm.absent}');
+  row('ছুটি', '${sm.leave}');
+  row('মোট ওটি ঘন্টা', plainNum(sm.otHours));
+  row('নাইট দিন', '${sm.nights}');
+  row('স্ট্যান্ডার্ড দিন (শুক্র বাদে)', '${sm.standard.round()}');
+  row('দৈনিক হার', '${sm.daily.round()}');
+  row('সমন্বিত বেতন', '${sm.combined.round()}');
+  row('ওটি পেমেন্ট', '${sm.otPay.round()}');
+  row('ট্রান্সপোর্ট', '${sm.transportPay.round()}');
+  row('নাইট বিল', '${sm.nightPay.round()}');
+  row('মোট আয় (গ্রস)', '${sm.gross.round()}');
+  row('প্রভিডেন্ট ফান্ড', '${sm.pf.round()}');
+  row('সর্বমোট বেতন (নিট)', '${sm.net.round()}');
+  return b.toString();
+}
+
+String exportMonth(SharedPreferences p, PaySettings s, DateTime start) {
+  final e = readPeriod(p, start);
+  if (e.isEmpty) return '';
+  final b = StringBuffer();
+  if (s.name.isNotEmpty) b.writeln('নাম\t${s.name}');
+  b.write(monthBlock(s, start, e));
+  return b.toString();
+}
+
+// পুরো বছর: আগে প্রতি মাসের সারাংশ টেবিল, তারপর প্রতি মাসের দৈনিক টেবিল
+String exportYear(SharedPreferences p, PaySettings s, int year) {
+  final head = StringBuffer();
+  final blocks = StringBuffer();
+  var any = false;
+  var tP = 0;
+  double tOt = 0;
+  double tGross = 0;
+  double tNet = 0;
+  if (s.name.isNotEmpty) head.writeln('নাম\t${s.name}');
+  head.writeln('বছর\t$year');
+  head.writeln(
+      'মাস (২৬ তারিখ শুরু)\tউপস্থিত\tঅনুপস্থিত\tছুটি\tওটি ঘন্টা\tনাইট\tসমন্বিত বেতন\tওটি পেমেন্ট\tট্রান্সপোর্ট\tনাইট বিল\tমোট আয়\tপিএফ\tনিট বেতন');
+  for (var m = 1; m <= 12; m++) {
+    final start = DateTime(year, m, 26);
+    final e = readPeriod(p, start);
+    if (e.isEmpty) continue;
+    any = true;
+    final sm = calcSummary(s, start, daysInMonth(start.year, start.month), e);
+    head.writeln([
+      '${kMon[m - 1]} $year',
+      '${sm.present}',
+      '${sm.absent}',
+      '${sm.leave}',
+      plainNum(sm.otHours),
+      '${sm.nights}',
+      '${sm.combined.round()}',
+      '${sm.otPay.round()}',
+      '${sm.transportPay.round()}',
+      '${sm.nightPay.round()}',
+      '${sm.gross.round()}',
+      '${sm.pf.round()}',
+      '${sm.net.round()}',
+    ].join('\t'));
+    tP += sm.present;
+    tOt += sm.otHours;
+    tGross += sm.gross;
+    tNet += sm.net;
+    blocks.writeln();
+    blocks.write(monthBlock(s, start, e));
+  }
+  if (!any) return '';
+  head.writeln([
+    'মোট',
+    '$tP',
+    '',
+    '',
+    plainNum(tOt),
+    '',
+    '',
+    '',
+    '',
+    '',
+    '${tGross.round()}',
+    '',
+    '${tNet.round()}',
+  ].join('\t'));
+  return head.toString() + blocks.toString();
+}
+
+String buildBackup(SharedPreferences p, PaySettings s) {
+  final periods = <String, dynamic>{};
+  for (final k in p.getKeys()) {
+    if (!k.startsWith('p_')) continue;
+    final raw = p.getString(k);
+    if (raw == null) continue;
+    try {
+      periods[k.substring(2)] = jsonDecode(raw);
+    } catch (_) {}
+  }
+  return jsonEncode({
+    'app': 'duty_hisab',
+    'v': 1,
+    'saved': DateTime.now().toIso8601String(),
+    'settings': s.toJson(),
+    'periods': periods,
+  });
+}
+
+Map<String, dynamic>? parseBackup(String text) {
+  final a = text.indexOf('{');
+  final z = text.lastIndexOf('}');
+  if (a < 0 || z <= a) return null;
+  try {
+    final j = jsonDecode(text.substring(a, z + 1));
+    if (j is Map && j['app'] == 'duty_hisab' && j['periods'] is Map) {
+      return Map<String, dynamic>.from(j);
+    }
+  } catch (_) {}
+  return null;
+}
+
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
 
@@ -303,8 +467,10 @@ class _HomePageState extends State<HomePage> {
   SharedPreferences? _prefs;
   PaySettings _s = PaySettings();
   bool _hasSettings = false;
+  bool _firstRun = false;
   bool _ready = false;
-  int _tab = 1; // 0 সেটআপ, 1 হাজিরা, 2 হিসাব
+  int _view = 0; // 0 মূল পেজ, 1 সেটিংস, 2 বেতনের তথ্য, 3 ব্যাকআপ
+  int _tab = 0; // 0 হাজিরা, 1 হিসাব
   late DateTime _start;
   Map<String, DayEntry> _e = {};
 
@@ -315,9 +481,9 @@ class _HomePageState extends State<HomePage> {
     _load();
   }
 
-  Future<void> _load() async {
-    final p = await SharedPreferences.getInstance();
-    _prefs = p;
+  void _loadSettings(SharedPreferences p) {
+    _hasSettings = false;
+    _s = PaySettings();
     final raw = p.getString('settings');
     if (raw != null) {
       try {
@@ -326,26 +492,27 @@ class _HomePageState extends State<HomePage> {
         _hasSettings = true;
       } catch (_) {}
     }
-    if (!_hasSettings) _tab = 0;
-    _readPeriod();
+  }
+
+  Future<void> _load() async {
+    final p = await SharedPreferences.getInstance();
+    _prefs = p;
+    _loadSettings(p);
+    if (!_hasSettings) {
+      _firstRun = true;
+      _view = 2;
+    }
+    _e = readPeriod(p, _start);
     if (!mounted) return;
     setState(() => _ready = true);
   }
 
-  String get _periodKey =>
-      'p_${_start.year}-${_start.month.toString().padLeft(2, '0')}';
-
-  void _readPeriod() {
-    _e = {};
-    final raw = _prefs?.getString(_periodKey);
-    if (raw == null) return;
-    try {
-      final m = jsonDecode(raw) as Map;
-      m.forEach((k, v) {
-        _e[k as String] =
-            DayEntry.fromJson(Map<String, dynamic>.from(v as Map));
-      });
-    } catch (_) {}
+  Future<void> _afterRestore() async {
+    final p = _prefs;
+    if (p == null) return;
+    _loadSettings(p);
+    _e = readPeriod(p, _start);
+    if (mounted) setState(() {});
   }
 
   void _writePeriod() {
@@ -353,7 +520,7 @@ class _HomePageState extends State<HomePage> {
     _e.forEach((k, v) {
       if (!v.isEmpty) out[k] = v.toJson();
     });
-    _prefs?.setString(_periodKey, jsonEncode(out));
+    _prefs?.setString(periodKeyFor(_start), jsonEncode(out));
   }
 
   void _onSettings(PaySettings s) {
@@ -364,10 +531,28 @@ class _HomePageState extends State<HomePage> {
     _prefs?.setString('settings', jsonEncode(_s.toJson()));
   }
 
+  void _saveInfoDone() {
+    setState(() {
+      _view = _firstRun ? 0 : 1;
+      _firstRun = false;
+    });
+  }
+
+  void _back() {
+    setState(() {
+      if (_view == 2 || _view == 3) {
+        _view = 1;
+      } else {
+        _view = 0;
+      }
+    });
+  }
+
   void _shift(int delta) {
+    final p = _prefs;
     setState(() {
       _start = DateTime(_start.year, _start.month + delta, 26);
-      _readPeriod();
+      _e = p == null ? {} : readPeriod(p, _start);
     });
   }
 
@@ -450,52 +635,103 @@ class _HomePageState extends State<HomePage> {
     final keyboardOpen = MediaQuery.of(context).viewInsets.bottom > 0;
     final bottomInset = MediaQuery.of(context).viewPadding.bottom;
 
-    Widget content;
-    if (_tab == 0) {
-      content = SetupTab(
+    final kids = <Widget>[_masthead(end)];
+    if (_view == 0) {
+      kids.add(_hero(sm, elapsed, inPeriod, today));
+      kids.add(AnimatedSwitcher(
+        duration: const Duration(milliseconds: 220),
+        child: KeyedSubtree(
+          key: ValueKey(_tab),
+          child: _tab == 0 ? _attendanceTab(length, today) : _ledgerTab(sm),
+        ),
+      ));
+    } else if (_view == 1) {
+      kids.add(_settingsList());
+    } else if (_view == 2) {
+      kids.add(SetupTab(
         settings: _s,
         onChanged: _onSettings,
-        onDone: () => setState(() => _tab = 1),
-      );
-    } else if (_tab == 1) {
-      content = _attendanceTab(length, today);
+        onDone: _saveInfoDone,
+      ));
     } else {
-      content = _ledgerTab(sm);
+      kids.add(BackupPage(
+        prefs: _prefs!,
+        settings: _s,
+        currentStart: _start,
+        onRestored: _afterRestore,
+      ));
     }
 
-    return Scaffold(
-      backgroundColor: kPaper,
-      body: Stack(
-        children: [
-          SafeArea(
-            bottom: false,
-            child: ListView(
-              padding: const EdgeInsets.fromLTRB(18, 10, 18, 120),
-              children: [
-                _masthead(end),
-                _hero(sm, elapsed, inPeriod, today),
-                AnimatedSwitcher(
-                  duration: const Duration(milliseconds: 220),
-                  child: KeyedSubtree(key: ValueKey(_tab), child: content),
-                ),
-              ],
+    return PopScope(
+      canPop: _view == 0,
+      onPopInvokedWithResult: (didPop, result) {
+        if (!didPop) _back();
+      },
+      child: Scaffold(
+        backgroundColor: kPaper,
+        body: Stack(
+          children: [
+            SafeArea(
+              bottom: false,
+              child: ListView(
+                padding: EdgeInsets.fromLTRB(18, 10, 18, _view == 0 ? 120 : 40),
+                children: kids,
+              ),
             ),
-          ),
-          if (!keyboardOpen)
-            Positioned(
-              left: 18,
-              right: 18,
-              bottom: 14 + bottomInset,
-              child: _navBar(),
-            ),
-        ],
+            if (_view == 0 && !keyboardOpen)
+              Positioned(
+                left: 18,
+                right: 18,
+                bottom: 14 + bottomInset,
+                child: _navBar(),
+              ),
+          ],
+        ),
       ),
     );
   }
 
-  Widget _masthead(DateTime end) {
+  Widget _rules() {
     return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const SizedBox(height: 4),
+        Container(height: 1.5, color: kInk),
+        const SizedBox(height: 2),
+        Container(height: 1, color: kInk),
+      ],
+    );
+  }
+
+  Widget _masthead(DateTime end) {
+    if (_view != 0) {
+      final title =
+          _view == 1 ? 'সেটিংস' : (_view == 2 ? 'বেতনের তথ্য' : 'ব্যাকআপ');
+      return Column(
+        children: [
+          Row(
+            children: [
+              InkWell(
+                onTap: _back,
+                borderRadius: BorderRadius.circular(20),
+                child: const Padding(
+                  padding: EdgeInsets.all(6),
+                  child: Icon(Icons.arrow_back, size: 22, color: kInk),
+                ),
+              ),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(title,
+                    style: ts(21, w: FontWeight.w500, serif: true)),
+              ),
+            ],
+          ),
+          _rules(),
+        ],
+      );
+    }
+    final label =
+        '${dShort(_start)} ${bn(_start.year.toString())} – ${dShort(end)} ${bn(end.year.toString())}';
+    return Column(
       children: [
         Row(
           children: [
@@ -504,29 +740,94 @@ class _HomePageState extends State<HomePage> {
                   style: ts(21, w: FontWeight.w500, serif: true)),
             ),
             InkWell(
-              onTap: () => _shift(-1),
+              onTap: () => setState(() => _view = 1),
               borderRadius: BorderRadius.circular(20),
-              child: const Padding(
-                padding: EdgeInsets.all(4),
-                child: Icon(Icons.chevron_left, size: 20, color: kMuted),
-              ),
-            ),
-            Text('${dShort(_start)} – ${dShort(end)}',
-                style: ts(12, color: kMuted)),
-            InkWell(
-              onTap: () => _shift(1),
-              borderRadius: BorderRadius.circular(20),
-              child: const Padding(
-                padding: EdgeInsets.all(4),
-                child: Icon(Icons.chevron_right, size: 20, color: kMuted),
+              child: Container(
+                width: 38,
+                height: 38,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  border: Border.all(color: kRule, width: 0.8),
+                ),
+                child: const Icon(Icons.settings_outlined,
+                    size: 20, color: kInk),
               ),
             ),
           ],
         ),
         const SizedBox(height: 4),
-        Container(height: 1.5, color: kInk),
-        const SizedBox(height: 2),
-        Container(height: 1, color: kInk),
+        Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            InkWell(
+              onTap: () => _shift(-1),
+              borderRadius: BorderRadius.circular(20),
+              child: const Padding(
+                padding: EdgeInsets.all(4),
+                child: Icon(Icons.chevron_left, size: 22, color: kMuted),
+              ),
+            ),
+            Text(label, style: ts(12, color: kMuted)),
+            InkWell(
+              onTap: () => _shift(1),
+              borderRadius: BorderRadius.circular(20),
+              child: const Padding(
+                padding: EdgeInsets.all(4),
+                child: Icon(Icons.chevron_right, size: 22, color: kMuted),
+              ),
+            ),
+          ],
+        ),
+        _rules(),
+      ],
+    );
+  }
+
+  Widget _settingsList() {
+    Widget opt(IconData icon, String title, String sub, int target) {
+      return GestureDetector(
+        onTap: () => setState(() => _view = target),
+        child: Container(
+          margin: const EdgeInsets.only(top: 12),
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(
+            color: kCard,
+            border: Border.all(color: kRule, width: 0.8),
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: Row(
+            children: [
+              Icon(icon, size: 24, color: kRed),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(title, style: ts(15, w: FontWeight.w500)),
+                    const SizedBox(height: 2),
+                    Text(sub, style: ts(12, color: kMuted)),
+                  ],
+                ),
+              ),
+              const Icon(Icons.chevron_right, color: kGrey),
+            ],
+          ),
+        ),
+      );
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        opt(Icons.account_balance_wallet_outlined, 'বেতনের তথ্য',
+            'মূল বেতন, ওটি রেট, ট্রান্সপোর্ট, নাইট বিল', 2),
+        opt(Icons.cloud_download_outlined, 'ব্যাকআপ',
+            'এক্সপোর্ট, ব্যাকআপ, ফিরিয়ে আনা', 3),
+        const SizedBox(height: 20),
+        Center(
+          child: Text('ডিউটি হিসাব · সংস্করণ ১.১.০',
+              style: ts(11, color: kMuted)),
+        ),
       ],
     );
   }
@@ -689,9 +990,8 @@ class _HomePageState extends State<HomePage> {
       ),
       child: Row(
         children: [
-          item(0, 'সেটআপ', Icons.settings_outlined),
-          item(1, 'হাজিরা', Icons.calendar_month_outlined),
-          item(2, 'হিসাব', Icons.receipt_long_outlined),
+          item(0, 'হাজিরা', Icons.calendar_month_outlined),
+          item(1, 'হিসাব', Icons.receipt_long_outlined),
         ],
       ),
     );
@@ -699,7 +999,7 @@ class _HomePageState extends State<HomePage> {
 
   Widget _setupBanner() {
     return GestureDetector(
-      onTap: () => setState(() => _tab = 0),
+      onTap: () => setState(() => _view = 2),
       child: Container(
         margin: const EdgeInsets.only(top: 12),
         padding: const EdgeInsets.all(10),
@@ -707,7 +1007,7 @@ class _HomePageState extends State<HomePage> {
           color: const Color(0xFFF3DAD7),
           borderRadius: BorderRadius.circular(8),
         ),
-        child: Text('আগে "সেটআপ" ট্যাবে বেতনের তথ্য বসান, তাহলে হিসাব ঠিক আসবে।',
+        child: Text('আগে বেতনের তথ্য বসান (এখানে ট্যাপ করুন), তাহলে হিসাব ঠিক আসবে।',
             style: ts(13, color: kRed)),
       ),
     );
@@ -1049,11 +1349,7 @@ class _SetupTabState extends State<SetupTab> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Padding(
-          padding: const EdgeInsets.only(top: 12, bottom: 2),
-          child: Text('বেতনের তথ্য',
-              style: ts(16, w: FontWeight.w500, serif: true)),
-        ),
+        const SizedBox(height: 12),
         Text('একবার বসান, ফোনেই সেভ থাকবে। যে কেউ নিজের হিসাব দিয়ে ব্যবহার করতে পারবে।',
             style: ts(12, color: kMuted, h: 1.4)),
         const SizedBox(height: 6),
@@ -1096,10 +1392,245 @@ class _SetupTabState extends State<SetupTab> {
               shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(10)),
             ),
-            child: Text('সেভ করে হাজিরায় যান',
+            child: Text('সেভ করুন',
                 style: ts(14, color: Colors.white, w: FontWeight.w500)),
           ),
         ),
+      ],
+    );
+  }
+}
+
+// ───────────────────────── ব্যাকআপ পেজ ─────────────────────────
+class BackupPage extends StatefulWidget {
+  final SharedPreferences prefs;
+  final PaySettings settings;
+  final DateTime currentStart;
+  final Future<void> Function() onRestored;
+
+  const BackupPage({
+    super.key,
+    required this.prefs,
+    required this.settings,
+    required this.currentStart,
+    required this.onRestored,
+  });
+
+  @override
+  State<BackupPage> createState() => _BackupPageState();
+}
+
+class _BackupPageState extends State<BackupPage> {
+  bool _yearMode = false;
+  late DateTime _start;
+  late int _year;
+
+  @override
+  void initState() {
+    super.initState();
+    _start = widget.currentStart;
+    _year = widget.currentStart.year;
+  }
+
+  void _snack(String m) {
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text(m, style: ts(13, color: Colors.white)),
+      backgroundColor: kInk,
+      behavior: SnackBarBehavior.floating,
+    ));
+  }
+
+  Future<void> _copy(String text, String done) async {
+    await Clipboard.setData(ClipboardData(text: text));
+    if (!mounted) return;
+    _snack(done);
+  }
+
+  void _exportExcel() {
+    final t = _yearMode
+        ? exportYear(widget.prefs, widget.settings, _year)
+        : exportMonth(widget.prefs, widget.settings, _start);
+    if (t.isEmpty) {
+      _snack(_yearMode ? 'এই বছরে কোনো ডেটা নেই।' : 'এই মাসে কোনো ডেটা নেই।');
+      return;
+    }
+    _copy(t, 'কপি হয়েছে। Google Sheets বা Excel এ পেস্ট করুন।');
+  }
+
+  void _backup() {
+    _copy(buildBackup(widget.prefs, widget.settings),
+        'ব্যাকআপ কপি হয়েছে। WhatsApp বা Notes এ পেস্ট করে রেখে দিন।');
+  }
+
+  Future<void> _restore() async {
+    final d = await Clipboard.getData(Clipboard.kTextPlain);
+    final j = parseBackup(d?.text ?? '');
+    if (!mounted) return;
+    if (j == null) {
+      _snack('কপি করা লেখায় ব্যাকআপ পাওয়া যায়নি। আগে ব্যাকআপের লেখাটা কপি করুন।');
+      return;
+    }
+    final periods = Map<String, dynamic>.from(j['periods'] as Map);
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: kPaper,
+        title: Text('ফিরিয়ে আনবেন?',
+            style: ts(18, w: FontWeight.w500, serif: true)),
+        content: Text(
+            'ব্যাকআপে ${bn(periods.length.toString())} মাসের ডেটা আছে। বেতনের তথ্যসহ এটা এখনকার ডেটার ওপর বসবে।',
+            style: ts(14, h: 1.4)),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: Text('বাদ দিন', style: ts(14, color: kMuted)),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: Text('ফিরিয়ে আনুন',
+                style: ts(14, color: kRed, w: FontWeight.w500)),
+          ),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    final p = widget.prefs;
+    final st = j['settings'];
+    if (st is Map) {
+      await p.setString('settings', jsonEncode(Map<String, dynamic>.from(st)));
+    }
+    for (final k in periods.keys) {
+      await p.setString('p_$k', jsonEncode(periods[k]));
+    }
+    await widget.onRestored();
+    if (!mounted) return;
+    _snack('ফিরিয়ে আনা হয়েছে।');
+  }
+
+  Widget _pill(String t, bool on, VoidCallback f) {
+    return GestureDetector(
+      onTap: f,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
+        decoration: BoxDecoration(
+          color: on ? kInk : Colors.transparent,
+          borderRadius: BorderRadius.circular(999),
+          border: Border.all(color: on ? kInk : kRule, width: 1.5),
+        ),
+        child: Text(t, style: ts(13, color: on ? kPaper : kInk)),
+      ),
+    );
+  }
+
+  Widget _btn(String t, IconData icon, Color bg, Color fg, VoidCallback f,
+      {bool outline = false}) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 10),
+      child: SizedBox(
+        width: double.infinity,
+        height: 44,
+        child: ElevatedButton.icon(
+          onPressed: f,
+          icon: Icon(icon, size: 18),
+          label: Text(t, style: ts(14, color: fg, w: FontWeight.w500)),
+          style: ElevatedButton.styleFrom(
+            backgroundColor: bg,
+            foregroundColor: fg,
+            elevation: 0,
+            side: outline ? const BorderSide(color: kInk, width: 1.5) : null,
+            shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(10)),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _navRow(String label, VoidCallback prev, VoidCallback next) {
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        InkWell(
+          onTap: prev,
+          borderRadius: BorderRadius.circular(20),
+          child: const Padding(
+            padding: EdgeInsets.all(6),
+            child: Icon(Icons.chevron_left, size: 24, color: kInk),
+          ),
+        ),
+        Text(label, style: ts(14, w: FontWeight.w500)),
+        InkWell(
+          onTap: next,
+          borderRadius: BorderRadius.circular(20),
+          child: const Padding(
+            padding: EdgeInsets.all(6),
+            child: Icon(Icons.chevron_right, size: 24, color: kInk),
+          ),
+        ),
+      ],
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final length = daysInMonth(_start.year, _start.month);
+    final end = DateTime(_start.year, _start.month, _start.day + length - 1);
+    final monthLabel =
+        '${dShort(_start)} ${bn(_start.year.toString())} – ${dShort(end)} ${bn(end.year.toString())}';
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Padding(
+          padding: const EdgeInsets.only(top: 14, bottom: 8),
+          child: Text('কী এক্সপোর্ট করবেন',
+              style: ts(15, w: FontWeight.w500, serif: true)),
+        ),
+        Row(
+          children: [
+            _pill('একটি মাস', !_yearMode, () => setState(() => _yearMode = false)),
+            const SizedBox(width: 8),
+            _pill('পুরো বছর', _yearMode, () => setState(() => _yearMode = true)),
+          ],
+        ),
+        const SizedBox(height: 8),
+        if (_yearMode)
+          _navRow(bn(_year.toString()), () => setState(() => _year--),
+              () => setState(() => _year++))
+        else
+          _navRow(
+              monthLabel,
+              () => setState(() =>
+                  _start = DateTime(_start.year, _start.month - 1, 26)),
+              () => setState(() =>
+                  _start = DateTime(_start.year, _start.month + 1, 26))),
+        if (_yearMode)
+          Text('প্রতি মাসের সারাংশ আর দৈনিক হাজিরা একসাথে থাকবে।',
+              style: ts(12, color: kMuted)),
+        _btn('Excel এক্সপোর্ট (কপি হবে)', Icons.table_chart_outlined, kRed,
+            Colors.white, _exportExcel),
+        const SizedBox(height: 8),
+        Text('কপি করে Google Sheets বা Excel এ পেস্ট করলে টেবিল হয়ে যাবে।',
+            style: ts(12, color: kMuted, h: 1.4)),
+        const SizedBox(height: 18),
+        Container(height: 1, color: kRule),
+        Padding(
+          padding: const EdgeInsets.only(top: 16, bottom: 2),
+          child: Text('ব্যাকআপ',
+              style: ts(15, w: FontWeight.w500, serif: true)),
+        ),
+        Text(
+            'ফোন বদলালে বা অ্যাপ মুছলে সব ডেটা ফিরিয়ে আনার জন্য। সব মাসের ডেটা আর বেতনের তথ্য একসাথে থাকবে।',
+            style: ts(12, color: kMuted, h: 1.4)),
+        _btn('ব্যাকআপ কপি করুন', Icons.save_alt, kInk, kPaper, _backup),
+        const SizedBox(height: 8),
+        Text('কপি করে WhatsApp এ নিজেকে পাঠিয়ে রাখুন বা Notes এ সেভ করুন।',
+            style: ts(12, color: kMuted, h: 1.4)),
+        _btn('ব্যাকআপ থেকে ফিরিয়ে আনুন', Icons.restore, kPaper, kInk,
+            _restore,
+            outline: true),
+        const SizedBox(height: 8),
+        Text('ফিরিয়ে আনতে আগে ব্যাকআপের লেখাটা কপি করুন, তারপর এই বোতাম চাপুন।',
+            style: ts(12, color: kMuted, h: 1.4)),
       ],
     );
   }
